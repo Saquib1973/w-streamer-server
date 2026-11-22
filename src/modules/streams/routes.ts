@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { ResolveStreamBody, StreamsQuery, type ApiResponses } from "../../contracts/api.js";
+import { CachedCheckBody, ResolveStreamBody, StreamsQuery, type ApiResponses } from "../../contracts/api.js";
 import { authenticate, ctx, requireProfile } from "../../middleware/auth.js";
 import { param, parseBody, parseQuery } from "../../middleware/validate.js";
 import * as svc from "./service.js";
@@ -20,6 +20,13 @@ streamsRouter.get("/streams/:type/:videoId", async (req, res) => {
 
 streamsRouter.get("/subtitles/:type/:videoId", async (req, res) => {
   const out: ApiResponses["GET /subtitles/:type/:videoId"] = { subtitles: await svc.listSubtitles(viewer(req), param(req, "type"), param(req, "videoId")) };
+  res.json(out);
+});
+
+/** Debrid instant-availability for torrent results the device fetched itself. */
+streamsRouter.post("/debrid/cached", async (req, res) => {
+  const body = parseBody(CachedCheckBody, req);
+  const out: ApiResponses["POST /debrid/cached"] = { cached: await svc.checkCachedHashes(viewer(req).ownerId, body.hashes.map((h) => h.toLowerCase())) };
   res.json(out);
 });
 

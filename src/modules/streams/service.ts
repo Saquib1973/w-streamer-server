@@ -139,6 +139,23 @@ export async function listSubtitles(v: Viewer, type: string, videoId: string) {
   return ok.flatMap((r) => r.value);
 }
 
+/** infoHash → per-provider cache flags, for providers that expose a cache check (TorBox). */
+export async function checkCachedHashes(ownerId: string, hashes: string[]) {
+  const tokens = await debridTokens(ownerId);
+  const out: Record<string, Partial<Record<DebridProvider, boolean>>> = {};
+  await Promise.all(
+    (Object.keys(tokens) as DebridProvider[]).map(async (p) => {
+      try {
+        const m = await ADAPTERS[p].checkCached(tokens[p]!, hashes);
+        for (const [h, v] of m) (out[h] ??= {})[p] = v;
+      } catch (err) {
+        logger.debug({ err, p }, "debrid cache check failed");
+      }
+    }),
+  );
+  return out;
+}
+
 /* ═══════════════ Resolution ═══════════════ */
 
 interface TorrentRef {

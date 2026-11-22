@@ -27,6 +27,29 @@ addonsRouter.get("/", requireProfile, async (req, res) => {
   res.json(out);
 });
 
+/**
+ * Stream addons the DEVICE should query directly (URLs with vault keys filled in).
+ * Fetching streams from the phone keeps IP-bound playback links valid (e.g. ElfHosted).
+ */
+addonsRouter.get("/stream-endpoints", requireProfile, async (req, res) => {
+  const c = ctx(req);
+  const type = typeof req.query.type === "string" ? req.query.type : "";
+  const id = typeof req.query.id === "string" ? req.query.id : "";
+  if (!type || !id) throw new AppError("VALIDATION_FAILED", "type and id are required");
+  const addons = (await svc.visibleAddons(c.ownerId, c.policy, c.profile.id)).filter((a) => svc.supports(a, "stream", type, id));
+  const endpoints = await Promise.all(
+    addons.map(async (a) => {
+      try {
+        return { addonId: a.id, name: a.name, baseUrl: svc.baseOf(await svc.materializeUrl(a.userId, a.transportUrl, a.injectVault)) };
+      } catch {
+        return null; // e.g. vault key missing for a placeholder addon
+      }
+    }),
+  );
+  const out: ApiResponses["GET /addons/stream-endpoints"] = { endpoints: endpoints.filter((e): e is NonNullable<typeof e> => !!e) };
+  res.json(out);
+});
+
 addonsRouter.post("/validate", requireFlag("allowAddonInstall"), async (req, res) => {
   const body = parseBody(AddonUrlBody, req);
   const out: ApiResponses["POST /addons/validate"] = await svc.validateAddon(req.auth!.ownerId, body.transportUrl);

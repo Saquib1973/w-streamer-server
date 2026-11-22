@@ -63,7 +63,7 @@ export async function registerAdmin(body: RegisterAdminBody, meta: ClientMeta) {
   audit("ADMIN_REGISTERED", { userId: user.id, ip: meta.ip });
   installBuiltinAddons(user.id).catch((err: unknown) => logger.warn({ err }, "builtin addon install failed"));
 
-  const { tokens } = await issueSession(user, null, meta);
+  const { tokens } = await issueSession(user, profile, meta);
   return { user, profiles: [profile], tokens };
 }
 
@@ -103,8 +103,8 @@ export async function login(body: LoginBody, meta: ClientMeta) {
   invalidateUser(user.id);
 
   const profiles = await prisma.profile.findMany({ where: { userId: user.id }, orderBy: [{ kind: "desc" }, { sortOrder: "asc" }] });
-  // Standalone CHILD logins go straight into their single profile.
-  const autoProfile = updated.role === "CHILD" ? (profiles[0] ?? null) : null;
+  // No profile picker: every login goes straight into the account's own profile.
+  const autoProfile = (updated.role === "ADMIN" ? profiles.find((p) => p.kind === "OWNER") : profiles[0]) ?? profiles[0] ?? null;
 
   audit("LOGIN_SUCCESS", { userId: user.id, ip: meta.ip, meta: { device: meta.deviceName ?? null } });
   const { tokens } = await issueSession(updated, autoProfile, meta);

@@ -624,6 +624,43 @@ export type PutProgressBody = z.infer<typeof PutProgressBody>;
 /** Server marks completed when positionSec / durationSec >= this. */
 export const COMPLETION_THRESHOLD = 0.9;
 
+/* ─── Phone-side stream fetching ─── */
+
+/** An addon the device may query directly for streams (URL has vault keys filled in). */
+export interface StreamEndpointDto {
+  addonId: string;
+  name: string;
+  /** Base URL without /manifest.json — request `${baseUrl}/stream/{type}/{id}.json`. */
+  baseUrl: string;
+}
+
+export const CachedCheckBody = z.object({ hashes: z.array(InfoHash).min(1).max(300) });
+export type CachedCheckBody = z.infer<typeof CachedCheckBody>;
+
+/* ─── Analytics (admin) ─── */
+
+export interface AnalyticsUserDto {
+  id: string;
+  username: string;
+  role: UserRole;
+  isLocked: boolean;
+  createdAt: string;
+  lastLoginAt: string | null;
+  activeSessions: number;
+  watchSeconds: number;
+  titlesWatched: number;
+  episodesWatched: number;
+  lastWatched: { metaId: string; name: string; at: string } | null;
+}
+
+export interface AnalyticsDto {
+  totals: { users: number; activeLast7d: number; watchSeconds: number; titlesWatched: number; plays: number };
+  users: AnalyticsUserDto[];
+  recent: { userId: string; username: string; metaId: string; name: string; videoId: string; season: number | null; episode: number | null; positionSec: number; durationSec: number; at: string }[];
+  /** Last 14 days, oldest first: seconds watched per day. */
+  daily: { day: string; watchSeconds: number }[];
+}
+
 /* ═══════════════════════ Response map (route → body) ═══════════════════════ */
 
 export interface ApiResponses {
@@ -653,6 +690,9 @@ export interface ApiResponses {
   "PATCH /admin/child-accounts/:userId": { account: ChildAccountDto };
   "DELETE /admin/child-accounts/:userId": { ok: true };
   "GET /admin/audit": Page<{ id: string; action: string; createdAt: string; meta: unknown }>;
+  "GET /admin/analytics": AnalyticsDto;
+  "GET /addons/stream-endpoints": { endpoints: StreamEndpointDto[] };
+  "POST /debrid/cached": { cached: Record<string, Partial<Record<DebridProvider, boolean>>> };
 
   "GET /vault": { entries: VaultEntryDto[]; providers: VaultProvider[] };
   "PUT /vault/:provider": { entry: VaultEntryDto; test: VaultTestResultDto | null };
