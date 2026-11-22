@@ -1,0 +1,362 @@
+// ═══════════════════════════════════════════════════════════════════════
+//  W-Streamer — Prisma schema (Supabase used purely as hosted PostgreSQL)
+//  No Supabase Auth. All identity lives in User / Profile / RefreshToken.
+// ═══════════════════════════════════════════════════════════════════════
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL") // runtime (pooler recommended)
+  directUrl  = env("DIRECT_URL") // migrations / db push
+  extensions = [citext] // case-insensitive email/username
+}
+
+// ───────────────────────────── Enums ─────────────────────────────
+
+/// Account-level role. Exactly one ADMIN per installation (enforced in code + SystemState).
+enum UserRole {
+  ADMIN
+  CHILD // standalone restricted login, owned by the ADMIN
+}
+
+/// Profile kind. OWNER = the admin's own unrestricted profile.
+enum ProfileKind {
+  OWNER
+  CHILD
+}
+
+/// Unified maturity scale. TV ratings are mapped in code:
+/// TV_Y/TV_Y7/TV_G → G, TV_PG → PG, TV_14 → PG_13, TV_MA → R.
+enum MaturityRating {
+  G
+  PG
+  PG_13
+  R
+  NC_17
+}
+
+enum VaultProvider {
+  TMDB
+  REAL_DEBRID
+  TORBOX
+  ALLDEBRID
+  OPENSUBTITLES
+  TRAKT
+  CUSTOM_TRACKER
+  CUSTOM_INDEXER
+}
+
+enum MediaType {
+  movie
+  series
+  channel
+  tv
+  other
+}
+
+enum AuditAction {
+  ADMIN_REGISTERED
+  LOGIN_SUCCESS
+  LOGIN_FAILED
+  LOGOUT
+  REFRESH_REUSE_DETECTED
+  PROFILE_CREATED
+  PROFILE_UPDATED
+  PROFILE_DELETED
+  PROFILE_PIN_CHANGED
+  PROFILE_PIN_FAILED
+  CHILD_ACCOUNT_CREATED
+  CHILD_ACCOUNT_UPDATED
+  CHILD_ACCOUNT_DELETED
+  VAULT_SECRET_SET
+  VAULT_SECRET_DELETED
+  ADDON_INSTALLED
+  ADDON_REMOVED
+  ADDON_UPDATED
+}
+
+// ─────────────────────────── System state ───────────────────────────
+
+/// Singleton row (id = 1). Registration lock: once adminSeededAt is set,
+/// /auth/register-admin is permanently disabled.
+model SystemState {
+  id                 Int       @id @default(1)
+  registrationLocked Boolean   @default(false)
+  adminSeededAt      DateTime?
+  schemaVersion      Int       @default(1)
+  updatedAt          DateTime  @updatedAt
+
+  @@map("system_state")
+}
+
+// ─────────────────────────── Identity ───────────────────────────
+
+model User {
+  id               String    @id @default(uuid()) @db.Uuid
+  email            String?   @unique @db.Citext
+  username         String    @unique @db.Citext
+  passwordHash     String // argon2id
+  role             UserRole
+  /// For CHILD users: the ADMIN who owns them. Null for the ADMIN.
+  ownerId          String?   @db.Uuid
+  isLocked         Boolean   @default(false)
+  failedLoginCount Int       @default(0)
+  lockedUntil      DateTime?
+  lastLoginAt      DateTime?
+  /// Bumped on password change / "log out everywhere"; embedded in JWTs to invalidate them.
+  tokenVersion     Int       @default(0)
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  owner         User?          @relation("UserOwnership", fields: [ownerId], references: [id], onDelete: Cascade)
+  childAccounts User[]         @relation("UserOwnership")
+  profiles      Profile[]
+  refreshTokens RefreshToken[]
+  vaultSecrets  VaultSecret[]
+  addons        Addon[]
+  auditLogs     AuditLog[]
+
+  @@index([ownerId])
+  @@map("users")
+}
+
+/// A viewing persona. ADMIN has one OWNER profile + any number of CHILD sub-profiles.
+/// A standalone CHILD user has exactly one CHILD profile (their own).
+model Profile {
+  id             String      @id @default(uuid()) @db.Uuid
+  userId         String      @db.Uuid
+  name           String      @db.VarChar(40)
+  avatar         String?     @db.VarChar(255) // asset key or URL
+  accentColor    String?     @db.VarChar(9) // #RRGGBBAA
+  kind           ProfileKind
+  /// argon2id hash of 4-digit PIN. On OWNER profile: required to switch back from a child profile.
+  pinHash        String?
+  pinFailedCount Int         @default(0)
+  pinLockedUntil DateTime?
+  sortOrder      Int         @default(0)
+  isLocked       Boolean     @default(false)
+
+  // ── Parental controls (ignored for OWNER) ──
+  maturityCap        MaturityRating @default(PG)
+  hideUnrated        Boolean        @default(true)
+  hideAdultAddons    Boolean        @default(true)
+  allowMagnetInput   Boolean        @default(false)
+  allowAddonInstall  Boolean        @default(false)
+  /// When true, child only sees addons explicitly allowed in ProfileAddon.
+  addonAllowlistOnly Boolean        @default(true)
+
+  // ── Player preferences ──
+  preferredAudioLang String? @db.VarChar(8)
+  preferredSubLang   String? @db.VarChar(8)
+  autoplayNext       Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user          User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  library       LibraryItem[]
+  progress      WatchProgress[]
+  addonAccess   ProfileAddon[]
+  refreshTokens RefreshToken[]
+
+  @@unique([userId, name])
+  @@index([userId, sortOrder])
+  @@map("profiles")
+}
+
+/// Rotating refresh tokens. Only SHA-256 hash stored. `familyId` groups a rotation
+/// chain — presenting an already-rotated token revokes the entire family (reuse detection).
+model RefreshToken {
+  id           String    @id @default(uuid()) @db.Uuid
+  userId       String    @db.Uuid
+  profileId    String?   @db.Uuid
+  tokenHash    String    @unique @db.Char(64)
+  familyId     String    @db.Uuid
+  deviceName   String?   @db.VarChar(80)
+  userAgent    String?   @db.VarChar(255)
+  ipAddress    String?   @db.VarChar(64)
+  expiresAt    DateTime
+  rotatedAt    DateTime?
+  revokedAt    DateTime?
+  replacedById String?   @db.Uuid
+  createdAt    DateTime  @default(now())
+
+  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  profile Profile? @relation(fields: [profileId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([familyId])
+  @@index([expiresAt])
+  @@map("refresh_tokens")
+}
+
+// ─────────────────────────── Token Vault ───────────────────────────
+
+/// AES-256-GCM encrypted credential. AAD = "<userId>:<provider>:<label>" binds
+/// ciphertext to its row so it can't be swapped between rows/providers.
+model VaultSecret {
+  id          String        @id @default(uuid()) @db.Uuid
+  userId      String        @db.Uuid
+  provider    VaultProvider
+  label       String        @default("default") @db.VarChar(60)
+  ciphertext  Bytes
+  iv          Bytes // 12 bytes
+  authTag     Bytes // 16 bytes
+  keyVersion  Int
+  /// Non-secret hint for the UI, e.g. "…a9F2".
+  hint        String        @db.VarChar(12)
+  /// Non-secret provider metadata (e.g. RD username, premium expiry, tracker URL).
+  meta        Json?
+  isActive    Boolean       @default(true)
+  lastUsedAt  DateTime?
+  lastCheckAt DateTime?
+  lastCheckOk Boolean?
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, provider, label])
+  @@map("vault_secrets")
+}
+
+// ─────────────────────────── Addons ───────────────────────────
+
+/// Installed Stremio addon (account-wide, owned by the ADMIN).
+model Addon {
+  id              String    @id @default(uuid()) @db.Uuid
+  userId          String    @db.Uuid
+  /// Normalised base URL ending in /manifest.json
+  transportUrl    String    @db.VarChar(1024)
+  manifestId      String    @db.VarChar(255) // manifest.id, e.g. "com.linvo.cinemeta"
+  name            String    @db.VarChar(120)
+  version         String    @db.VarChar(40)
+  description     String?
+  logo            String?   @db.VarChar(1024)
+  /// Full manifest snapshot (validated with zod at install time).
+  manifest        Json
+  resources       String[] // ["catalog","meta","stream","subtitles"]
+  types           String[] // ["movie","series",...]
+  idPrefixes      String[]
+  isAdult         Boolean   @default(false) // manifest.behaviorHints.adult
+  isProtected     Boolean   @default(false) // built-ins (Cinemeta) can't be removed
+  enabled         Boolean   @default(true)
+  sortOrder       Int       @default(0)
+  /// If true, server injects matching vault tokens into the transport URL config.
+  injectVault     Boolean   @default(false)
+  lastValidatedAt DateTime?
+  lastError       String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  profileAccess ProfileAddon[]
+
+  @@unique([userId, transportUrl])
+  @@index([userId, enabled, sortOrder])
+  @@map("addons")
+}
+
+/// Per-profile addon allowlist / override (used for CHILD profiles).
+model ProfileAddon {
+  profileId String  @db.Uuid
+  addonId   String  @db.Uuid
+  allowed   Boolean @default(true)
+
+  profile Profile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+  addon   Addon   @relation(fields: [addonId], references: [id], onDelete: Cascade)
+
+  @@id([profileId, addonId])
+  @@map("profile_addons")
+}
+
+// ─────────────────────────── Library & Progress ───────────────────────────
+
+/// Per-profile library / watchlist entry (isolated per child).
+model LibraryItem {
+  id            String          @id @default(uuid()) @db.Uuid
+  profileId     String          @db.Uuid
+  metaId        String          @db.VarChar(255) // "tt0111161", "kitsu:123", "tmdb:603"
+  type          MediaType
+  name          String          @db.VarChar(255)
+  poster        String?         @db.VarChar(1024)
+  background    String?         @db.VarChar(1024)
+  year          String?         @db.VarChar(16)
+  certification MaturityRating?
+  inWatchlist   Boolean         @default(true)
+  watched       Boolean         @default(false)
+  lastWatchedAt DateTime?
+  addedAt       DateTime        @default(now())
+  updatedAt     DateTime        @updatedAt
+
+  profile Profile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+
+  @@unique([profileId, metaId])
+  @@index([profileId, lastWatchedAt(sort: Desc)])
+  @@map("library_items")
+}
+
+/// Playback position. One row per (profile, video). For movies videoId = metaId;
+/// for series videoId = "<metaId>:<season>:<episode>" (Stremio convention).
+model WatchProgress {
+  id              String    @id @default(uuid()) @db.Uuid
+  profileId       String    @db.Uuid
+  metaId          String    @db.VarChar(255)
+  videoId         String    @db.VarChar(255)
+  type            MediaType
+  season          Int?
+  episode         Int?
+  positionSec     Float     @default(0)
+  durationSec     Float     @default(0)
+  completed       Boolean   @default(false)
+  /// Last stream used, so "resume" can reopen the same source: {kind, infoHash?, fileIdx?, url?, addonId?}
+  lastStream      Json?
+  audioTrack      String?   @db.VarChar(32)
+  subtitleLang    String?   @db.VarChar(8)
+  subtitleDelayMs Int       @default(0)
+  updatedAt       DateTime  @updatedAt
+  createdAt       DateTime  @default(now())
+
+  profile Profile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+
+  @@unique([profileId, videoId])
+  @@index([profileId, completed, updatedAt(sort: Desc)])
+  @@index([profileId, metaId])
+  @@map("watch_progress")
+}
+
+// ─────────────────────────── Caches ───────────────────────────
+
+/// Cached TMDB certification lookups so parental filtering doesn't hit TMDB per request.
+model RatingCache {
+  metaId        String          @id @db.VarChar(255)
+  type          MediaType
+  certification MaturityRating?
+  rawRating     String?         @db.VarChar(16) // "PG-13", "TV-MA", ...
+  country       String          @default("US") @db.VarChar(2)
+  fetchedAt     DateTime        @default(now())
+
+  @@map("rating_cache")
+}
+
+// ─────────────────────────── Audit ───────────────────────────
+
+model AuditLog {
+  id        BigInt      @id @default(autoincrement())
+  userId    String?     @db.Uuid
+  profileId String?     @db.Uuid
+  action    AuditAction
+  ipAddress String?     @db.VarChar(64)
+  meta      Json?
+  createdAt DateTime    @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([action, createdAt(sort: Desc)])
+  @@map("audit_logs")
+}
