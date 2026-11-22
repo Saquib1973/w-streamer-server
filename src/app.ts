@@ -52,6 +52,11 @@ export function createApp() {
   /* ── Streaming (stream-token auth, no JSON parsing, no rate limit) ── */
   app.use("/stream", streamRouter);
 
+  // Friendly root (Render and browsers probe "/"). The API itself lives under /api/v1.
+  app.get("/", (_req, res) => {
+    res.json({ name: "W-Streamer API", version: VERSION, api: API_PREFIX, health: "/health" });
+  });
+
   app.get("/health", async (_req, res) => {
     const db = await prisma.$queryRaw`SELECT 1`.then(() => "up" as const).catch(() => "down" as const);
     const out: ApiResponses["GET /health"] = { ok: true, version: VERSION, db, torrentEngine: torrentEngine.isUp ? "up" : "down" };

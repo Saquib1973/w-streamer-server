@@ -38,8 +38,16 @@ const EnvSchema = z.object({
   ADDON_TIMEOUT_MS: z.coerce.number().int().min(1000).max(30000).default(8000),
 });
 
-// On Render, the service's public https URL is provided automatically.
-if (!process.env.PUBLIC_BASE_URL && process.env.RENDER_EXTERNAL_URL) process.env.PUBLIC_BASE_URL = process.env.RENDER_EXTERNAL_URL;
+// ── Render (RENDER=true is set on every Render service) ──
+// The public https URL is provided automatically; a LAN/localhost value copied from a
+// local .env would make P2P stream links unreachable, so it's replaced as well.
+if (process.env.RENDER_EXTERNAL_URL) {
+  const current = process.env.PUBLIC_BASE_URL ?? "";
+  const isPrivate = !current || /^https?:\/\/(localhost|127\.|0\.0\.0\.0|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/i.test(current);
+  if (isPrivate) process.env.PUBLIC_BASE_URL = process.env.RENDER_EXTERNAL_URL;
+}
+// Render terminates TLS at a proxy: trust one hop so req.ip (rate limits, audit) is the real client.
+if (process.env.RENDER && !process.env.TRUST_PROXY) process.env.TRUST_PROXY = "1";
 
 const parsed = EnvSchema.safeParse(process.env);
 if (!parsed.success) {
