@@ -26,7 +26,8 @@ export function normalizeTransportUrl(input: string): string {
   const u = new URL(s);
   u.hash = "";
   if (!u.pathname.endsWith("/manifest.json")) u.pathname = u.pathname.replace(/\/+$/, "") + "/manifest.json";
-  return u.toString();
+  // URL() percent-encodes "{" / "}" — restore vault placeholders like {{TORBOX}} so they still match.
+  return u.toString().replace(/%7B%7B([A-Z_]+)%7D%7D/gi, (_m, name: string) => `{{${name.toUpperCase()}}}`);
 }
 
 /**
