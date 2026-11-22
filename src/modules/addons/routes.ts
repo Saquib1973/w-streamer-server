@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { AddonUrlBody, ImportStremioBody, InstallAddonBody, ReorderAddonsBody, UpdateAddonBody, type ApiResponses } from "../../contracts/api.js";
 import { importFromStremio } from "./stremio-import.js";
+import { assertTitleAllowed } from "../streams/service.js";
 import { prisma } from "../../db/prisma.js";
 import { toAddonDto } from "../../lib/dto.js";
 import { audit } from "../../lib/audit.js";
@@ -36,6 +37,7 @@ addonsRouter.get("/stream-endpoints", requireProfile, async (req, res) => {
   const type = typeof req.query.type === "string" ? req.query.type : "";
   const id = typeof req.query.id === "string" ? req.query.id : "";
   if (!type || !id) throw new AppError("VALIDATION_FAILED", "type and id are required");
+  await assertTitleAllowed({ ownerId: c.ownerId, profileId: c.profile.id, policy: c.policy }, type, id);
   const addons = (await svc.visibleAddons(c.ownerId, c.policy, c.profile.id)).filter((a) => svc.supports(a, "stream", type, id));
   const endpoints = await Promise.all(
     addons.map(async (a) => {

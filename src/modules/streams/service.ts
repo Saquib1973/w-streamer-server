@@ -26,7 +26,7 @@ import { getSecret } from "../vault/service.js";
 
 const RES_ORDER = ["480p", "720p", "1080p", "1440p", "2160p"] as const;
 
-async function assertTitleAllowed(v: Viewer, type: string, videoId: string) {
+export async function assertTitleAllowed(v: Viewer, type: string, videoId: string) {
   if (!v.policy.restricted) return;
   const rating = await getRating(v.ownerId, metaIdFromVideoId(type, videoId), type);
   if (!isAllowed(v.policy, rating)) throw new AppError("CONTENT_RESTRICTED", "This title isn't available on this profile");
