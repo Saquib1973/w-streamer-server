@@ -80,7 +80,7 @@ export const baseOf = (manifestUrl: string) => manifestUrl.replace(/\/manifest\.
 
 export async function fetchManifest(url: string): Promise<AddonManifest> {
   await assertPublicUrl(url);
-  const raw = await fetchJson(url, { timeoutMs: 6000, label: "Addon manifest" });
+  const raw = await fetchJson(url, { timeoutMs: 12_000, label: "Addon manifest" });
   const parsed = AddonManifest.safeParse(raw);
   if (!parsed.success)
     throw new AppError("ADDON_INVALID_MANIFEST", "That URL didn't return a valid Stremio manifest", parsed.error.issues.slice(0, 5));
@@ -119,8 +119,24 @@ function addonColumns(m: AddonManifest) {
   };
 }
 
-export async function installAddon(ownerId: string, input: string, opts: { injectVault?: boolean; isProtected?: boolean; policy?: ParentalPolicy; profileId?: string } = {}) {
-  const v = await validateAddon(ownerId, input);
+export async function installAddon(
+  ownerId: string,
+  input: string,
+  opts: { injectVault?: boolean; isProtected?: boolean; policy?: ParentalPolicy; profileId?: string; fallbackManifest?: unknown } = {},
+) {
+  let v: AddonValidationDto;
+  let liveError: string | null = null;
+  try {
+    v = await validateAddon(ownerId, input);
+  } catch (e) {
+    // Addon host down / slow: fall back to a known-good manifest (e.g. Stremio's stored copy).
+    const fb = opts.fallbackManifest ? AddonManifest.safeParse(opts.fallbackManifest) : null;
+    if (!fb?.success || (e instanceof AppError && e.code === "FORBIDDEN")) throw e;
+    const transportUrl = normalizeTransportUrl(input);
+    const existing = await prisma.addon.findUnique({ where: { userId_transportUrl: { userId: ownerId, transportUrl } } });
+    v = { transportUrl, manifest: fb.data, warnings: [], alreadyInstalled: !!existing };
+    liveError = `Installed from saved manifest — ${e instanceof Error ? e.message : "addon unreachable"}`.slice(0, 500);
+  }
   if (v.alreadyInstalled) throw new AppError("CONFLICT", "Addon is already installed");
   if (opts.policy?.restricted && opts.policy.hideAdultAddons && v.manifest.behaviorHints?.adult)
     throw new AppError("CONTENT_RESTRICTED", "Adult addons are blocked for this profile");
@@ -130,6 +146,7 @@ export async function installAddon(ownerId: string, input: string, opts: { injec
       userId: ownerId,
       transportUrl: v.transportUrl,
       ...addonColumns(v.manifest),
+      ...(liveError ? { lastError: liveError, lastValidatedAt: null } : {}),
       injectVault: opts.injectVault ?? false,
       isProtected: opts.isProtected ?? false,
       sortOrder: (max._max.sortOrder ?? -1) + 1,

@@ -13,7 +13,7 @@ interface StremioEnvelope<T> {
 }
 interface StremioCollectionAddon {
   transportUrl: string;
-  manifest?: { id?: string; name?: string };
+  manifest?: { id?: string; name?: string; [k: string]: unknown };
   flags?: { official?: boolean; protected?: boolean };
 }
 
@@ -70,7 +70,7 @@ export async function importFromStremio(ownerId: string, email: string, password
         continue;
       }
       try {
-        const addon = await installAddon(ownerId, url);
+        const addon = await installAddon(ownerId, url, { fallbackManifest: a.manifest });
         existing.add(url);
         out.imported.push({ name: addon.name, id: addon.id });
       } catch (e) {
