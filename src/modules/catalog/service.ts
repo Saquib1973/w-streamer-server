@@ -111,17 +111,55 @@ export async function search(v: Viewer, query: string, type?: string) {
 }
 
 /** Meta from the first addon (in user order) that serves it. */
+/** How "complete" a meta is: series by episode/season coverage, movies by detail fields. */
+function metaScore(m: MetaDetail): number {
+  const vids = m.videos ?? [];
+  const seasons = new Set(vids.map((x) => x.season ?? 0)).size;
+  const details = [m.description, m.background, m.poster, m.logo, m.releaseInfo, m.imdbRating, m.runtime].filter(Boolean).length + (m.genres?.length ? 1 : 0) + (m.cast?.length ? 1 : 0);
+  return vids.length * 10 + seasons * 50 + details;
+}
+
+/** After the first addon answers, wait at most this long for better answers. */
+const META_GRACE_MS = 1500;
+
+/**
+ * Asks every meta addon at once (not one after another, which made slow or dead
+ * addons stall the page) and returns the most complete answer: after the first
+ * success we wait a short grace period for the others, then pick the best.
+ * Addon order breaks ties.
+ */
 export async function getMeta(v: Viewer, type: string, id: string): Promise<{ meta: MetaDetail; addon: Addon }> {
   const addons = (await visibleAddons(v.ownerId, v.policy, v.profileId)).filter((a) => supports(a, "meta", type, id));
-  for (const a of addons) {
-    try {
-      const r = MetaResponse.safeParse(await callAddon(a, "meta", type, id));
-      if (r.success && r.data.meta) return { meta: r.data.meta, addon: a };
-    } catch {
-      /* try next */
-    }
-  }
-  throw new AppError("NOT_FOUND", "No addon could provide details for this title");
+  if (!addons.length) throw new AppError("NOT_FOUND", "No addon could provide details for this title");
+
+  const results: ({ meta: MetaDetail; addon: Addon } | null)[] = new Array(addons.length).fill(null);
+  await new Promise<void>((resolve) => {
+    let pending = addons.length;
+    let grace: NodeJS.Timeout | null = null;
+    const finish = () => {
+      if (grace) clearTimeout(grace);
+      resolve();
+    };
+    addons.forEach((a, i) => {
+      callAddon(a, "meta", type, id)
+        .then((raw) => {
+          const r = MetaResponse.safeParse(raw);
+          if (r.success && r.data.meta) {
+            results[i] = { meta: r.data.meta, addon: a };
+            if (!grace) grace = setTimeout(finish, META_GRACE_MS);
+          }
+        })
+        .catch(() => undefined)
+        .finally(() => {
+          if (--pending === 0) finish();
+        });
+    });
+  });
+
+  let best: { meta: MetaDetail; addon: Addon } | null = null;
+  for (const r of results) if (r && (!best || metaScore(r.meta) > metaScore(best.meta))) best = r;
+  if (!best) throw new AppError("NOT_FOUND", "No addon could provide details for this title");
+  return best;
 }
 
 export { fanOut };
